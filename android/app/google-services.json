@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "455123106117",
+    "project_id": "nu-demm-by-pndtech-cf251",
+    "storage_bucket": "nu-demm-by-pndtech-cf251.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:455123106117:android:1796322b7003f8d2b9262c",
+        "android_client_info": {
+          "package_name": "com.example.pndtech_pro"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBD-qgcrVESVbRxRT69mM1pFrLKO0zoKKA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
