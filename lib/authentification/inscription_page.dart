@@ -98,6 +98,7 @@ class _InscriptionPageState extends State<InscriptionPage> {
   }
 
 
+
   @override
   Widget build(BuildContext context) {
     return  Scaffold(

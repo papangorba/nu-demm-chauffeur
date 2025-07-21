@@ -28,24 +28,24 @@ class _MySplashScreenState extends State<MySplashScreen>{
   @override
   void initState(){
     super.initState();
-    
+
     startTimer();
   }
 
   Widget build(BuildContext context){
     return Material(
       child:Container(
-      color:Color(0xFFab71ad),
-      child: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Image.asset("images/image4.png"),
+        color:Color(0xFFab71ad),
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Image.asset("images/image4.png"),
 
-          ],
+            ],
+          ),
         ),
       ),
-    ),
     );
   }
 }

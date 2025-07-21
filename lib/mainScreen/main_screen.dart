@@ -31,10 +31,10 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
   @override
   Widget build(BuildContext context){
     return  WillPopScope(
-      onWillPop: () async {
-        await SystemNavigator.pop();
-        return false;
-      },
+        onWillPop: () async {
+          await SystemNavigator.pop();
+          return false;
+        },
         child: Scaffold(
 
           body: TabBarView(

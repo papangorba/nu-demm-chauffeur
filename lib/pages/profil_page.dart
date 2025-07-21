@@ -35,8 +35,8 @@ class _ProfilPageState extends State<ProfilPage> {
     if (user == null) return;
 
     final uid = user.uid;
-    String nomComplet = "Papa n dia";
-    String marqueVehicule = "Toyota";
+    String nomComplet = "nom inconnue";
+    String marqueVehicule = "Marque inconnue";
 
     // ─── Récupération chauffeur ──────────────────────────────────────────────
     final chauffeursSnapshot =

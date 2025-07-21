@@ -27,6 +27,7 @@ class VerificationPage extends StatefulWidget {
     required this.dateEmission,
   });
 
+
   @override
   State<VerificationPage> createState() => _VerificationPageState();
 
@@ -133,7 +134,7 @@ class _VerificationPageState extends State<VerificationPage> {
                 ),
                 onPressed: verifyCode,
                 child: const Text(
-                  "Vérifier",
+                    "Vérifier",
                     style: TextStyle(color: AppColors.white,fontSize: 22,fontWeight: FontWeight.bold)
                 ),
               ),

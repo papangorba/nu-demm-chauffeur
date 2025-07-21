@@ -3,6 +3,7 @@ import 'package:fluttertoast/fluttertoast.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:pndtech_pro/mainScreen/main_screen.dart';
+import '../global/global.dart';
 import '../theme/theme.dart';
 
 class VerificationPage2 extends StatefulWidget {
@@ -68,13 +69,14 @@ class _VerificationPage2State extends State<VerificationPage2> {
     }
   }
 
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
         title: const Text("Vérification OTP",
-            style: TextStyle(color: AppColors.white),
+          style: TextStyle(color: AppColors.white),
         ),
         backgroundColor: AppColors.primary,
       ),
@@ -119,7 +121,7 @@ class _VerificationPage2State extends State<VerificationPage2> {
                 ),
                 onPressed: verifyOTPCode,
                 child: const Text(
-                  "Vérifier",
+                    "Vérifier",
                     style: TextStyle(color: AppColors.white,fontSize: 22,fontWeight: FontWeight.bold)
                 ),
               ),
