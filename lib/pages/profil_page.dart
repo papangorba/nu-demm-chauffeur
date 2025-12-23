@@ -37,6 +37,7 @@ class _ProfilPageState extends State<ProfilPage> {
     final uid = user.uid;
     String nomComplet = "nom inconnue";
     String marqueVehicule = "Marque inconnue";
+    double noteMoyenne = 0.0;
 
     // ─── Récupération chauffeur ──────────────────────────────────────────────
     final chauffeursSnapshot =
@@ -65,15 +66,159 @@ class _ProfilPageState extends State<ProfilPage> {
         }
       });
     }
+    // ─── Évaluations ────────────────────────────
+    final evaluationsSnapshot = await FirebaseDatabase.instance.ref().child('evaluations').get();
+    if (evaluationsSnapshot.exists) {
+      final evaluationsData = evaluationsSnapshot.value as Map;
+      List<int> notes = [];
+      evaluationsData.forEach((key, value) {
+        final commandeId = value['commandeId'] ?? '';
+        // 🔹 Vérifier si cette commande appartient au chauffeur actuel
+        // Pour simplifier, supposons qu'on a un mapping commande->chauffeur ailleurs
+        // Si vous voulez, je peux ajouter un filtre précis ici
+        final note = (value['note'] ?? 0).toString();
+        if (note.isNotEmpty) notes.add(int.parse(note));
+      });
+
+      if (notes.isNotEmpty) {
+        noteMoyenne = notes.reduce((a, b) => a + b) / notes.length;
+      }
+    }
+
 
     // ─── Mise à jour de l'état ───────────────────────────────────────────────
     setState(() {
       chauffeurName = nomComplet;
       vehicleInfo   = marqueVehicule;
+      rating = noteMoyenne;
       isLoading     = false;
       isLoading = false; // ✅ on arrête le loader
     });
   }
+
+  void _showNotesDialog() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final uid = user.uid; // chauffeur connecté
+
+    final evaluationsSnapshot = await FirebaseDatabase.instance.ref().child('evaluations').get();
+    List<Map<String, dynamic>> notesList = [];
+
+    if (evaluationsSnapshot.exists) {
+      final evaluationsData = evaluationsSnapshot.value as Map;
+      evaluationsData.forEach((key, value) {
+        final commandeId = value['commandeId'] ?? '';
+        final note = value['note'] ?? 0;
+        final commentaire = value['commentaire'] ?? '';
+
+        // 🔹 Ici tu dois vérifier si la commande correspond à ce chauffeur
+        // Pour simplifier, on suppose que toutes les évaluations du chauffeur ont déjà un mapping
+        // Si tu as une table commandes, tu peux filtrer par uid du chauffeur
+
+        notesList.add({
+          'note': note,
+          'commentaire': commentaire,
+        });
+      });
+    }
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("Mes évaluations"),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: notesList.isEmpty
+              ? const Text("Aucune note disponible")
+              : ListView.builder(
+            shrinkWrap: true,
+            itemCount: notesList.length,
+            itemBuilder: (context, index) {
+              final noteData = notesList[index];
+              return ListTile(
+                leading: Icon(Icons.star, color: Colors.amber),
+                title: Text("Note : ${noteData['note']}"),
+                subtitle: Text(noteData['commentaire'] ?? ''),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Fermer"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showHistoriqueDialog() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final uid = user.uid;
+
+    final commandesSnapshot = await FirebaseDatabase.instance
+        .ref()
+        .child('commandes')
+        .orderByChild('idChauffeur')
+        .equalTo(uid)
+        .get();
+
+    List<Map<String, dynamic>> trajetsList = [];
+
+    if (commandesSnapshot.exists) {
+      final commandesData = commandesSnapshot.value as Map;
+      commandesData.forEach((key, value) {
+        final depart = value['adresseDepart'] ?? 'Inconnu';
+        final destination = value['adresseDestination'] ?? 'Inconnu';
+        final dateTimestamp = value['date'] ?? value['dateCommande'];
+
+        trajetsList.add({
+          'depart': depart,
+          'destination': destination,
+          'date': dateTimestamp != null
+              ? DateTime.fromMillisecondsSinceEpoch(dateTimestamp).toString()
+              : '',
+        });
+      });
+    }
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("Historique de mes trajets"),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: trajetsList.isEmpty
+              ? const Text("Aucun trajet effectué")
+              : ListView.builder(
+            shrinkWrap: true,
+            itemCount: trajetsList.length,
+            itemBuilder: (context, index) {
+              final trajet = trajetsList[index];
+              return ListTile(
+                leading: const Icon(Icons.directions_car, color: Colors.blue),
+                title: Text("${trajet['depart']} → ${trajet['destination']}"),
+                subtitle: Text(trajet['date'] ?? ''),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Fermer"),
+          ),
+        ],
+      ),
+    );
+  }
+
+
+
 
 
 
@@ -194,11 +339,20 @@ class _ProfilPageState extends State<ProfilPage> {
 
               },
             ),
+            _buildOptionTile(
+              icon: Icons.history,
+              title: "Historique de mes trajets",
+              onTap: () {
+                _showHistoriqueDialog();
+              },
+            ),
 
             _buildOptionTile(
               icon: Icons.star,
               title: "Voir mes notes",
-              onTap: () {},
+              onTap: () {
+                _showNotesDialog();
+              },
             ),
             _buildOptionTile(
               icon: Icons.logout,

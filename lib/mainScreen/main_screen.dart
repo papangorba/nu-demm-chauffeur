@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pndtech_pro/pages/home_page.dart';
-import 'package:pndtech_pro/pages/garage_page.dart';
+import 'package:pndtech_pro/pages/ajouter_trajet_page.dart';
 import 'package:pndtech_pro/pages/profil_page.dart';
 import 'package:pndtech_pro/pages/revenue_page.dart';
 import 'package:pndtech_pro/theme/theme.dart';
@@ -40,10 +40,10 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
           body: TabBarView(
             physics: const NeverScrollableScrollPhysics(),
             controller: tabController,
-            children: const [
+            children:  [
               HomePage(),
               RevenuePage(),
-              GaragesPage(),
+              AjouterTrajetPage(),
               ProfilPage(),
 
             ],
@@ -64,8 +64,8 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
               ),
               /////////////////////////////////////////
               BottomNavigationBarItem(
-                icon: Icon(Icons.build),
-                label: "Garage",
+                icon: Icon(Icons.car_rental),
+                label: "Covoiturage",
               ),
               /////////////////////////////////////////
               BottomNavigationBarItem(

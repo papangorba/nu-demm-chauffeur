@@ -51,6 +51,7 @@ class _HomePageState extends State<HomePage> {
 // Positions clés
   LatLng? _clientPosition;
   LatLng? _destinationPosition;
+  String? userAddress;
 
 // Navigation
   List<LatLng> _navigationRoute = [];
@@ -78,7 +79,11 @@ class _HomePageState extends State<HomePage> {
     _requestPermissionAndLocate();
     _chargerInfoChauffeur().then((_) {
       print("🔍 DEBUG - chauffeurInfo après chargement: $chauffeurInfo");
+
+      // Commencer à écouter **toutes les commandes en attente**
+      _ecouterToutesCommandesEnAttente();
     });
+
     _verifierCourseEnCours();
     _chauffeurPositionStream = Geolocator.getPositionStream().listen((pos) {
       setState(() {
@@ -93,8 +98,460 @@ class _HomePageState extends State<HomePage> {
         _fitBetween(_currentPosition!, _destinationPosition!);
       }
     });
+    // Charger infos chauffeur
+    _chargerInfoChauffeur().then((_) {
+      // Commencer à écouter les commandes Repas
+      _ecouterCommandesRepasEnAttente();
+    });
   }
   ///////////////////////////////jdj///////////////////////////
+  // 1. Méthode pour géocoder une adresse avec Nominatim
+  Future<LatLng?> _geocoderAdresse(String adresse) async {
+    try {
+      print("🔍 Géocodage: $adresse");
+
+      final url = Uri.parse(
+          'https://nominatim.openstreetmap.org/search'
+              '?q=${Uri.encodeComponent(adresse + ", Dakar, Senegal")}'
+              '&format=json'
+              '&addressdetails=1'
+              '&limit=1'
+              '&countrycodes=sn'
+      );
+
+      final response = await http.get(
+        url,
+        headers: {'User-Agent': 'NuDemmDriverApp/1.0'},
+      );
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+
+        if (data.isNotEmpty) {
+          final lat = double.parse(data[0]['lat']);
+          final lon = double.parse(data[0]['lon']);
+          print("✅ Coordonnées trouvées: $lat, $lon");
+          return LatLng(lat, lon);
+        }
+      }
+    } catch (e) {
+      print("❌ Erreur géocodage: $e");
+    }
+
+    // Position par défaut à Dakar si géocodage échoue
+    return LatLng(14.7167, -17.4677);
+  }
+
+// 2. Méthode pour calculer l'itinéraire avec OSRM
+  Future<Map<String, dynamic>?> _calculerItineraire(LatLng origine, LatLng destination) async {
+    try {
+      final url = Uri.parse(
+          'https://router.project-osrm.org/route/v1/driving/'
+              '${origine.longitude},${origine.latitude};${destination.longitude},${destination.latitude}'
+              '?overview=full&geometries=geojson&steps=true'
+      );
+
+      final response = await http.get(url);
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+
+        if (data['routes'] != null && data['routes'].isNotEmpty) {
+          final route = data['routes'][0];
+          final geometry = route['geometry']['coordinates'];
+
+          // Extraire les points de l'itinéraire
+          List<LatLng> routePoints = geometry.map<LatLng>((coord) {
+            return LatLng(coord[1].toDouble(), coord[0].toDouble());
+          }).toList();
+
+          return {
+            'points': routePoints,
+            'distance': (route['distance']?.toDouble() ?? 0.0) / 1000, // en km
+            'duration': (route['duration']?.toDouble() ?? 0.0) / 60,   // en minutes
+          };
+        }
+      }
+    } catch (e) {
+      print("❌ Erreur calcul itinéraire: $e");
+    }
+
+    return null;
+  }
+
+// 3. Navigation vers le client (étape 1)
+  Future<void> _naviguerVersClient() async {
+    if (_currentPosition == null || _courseEnCours == null) return;
+
+    print("🗺️ Début navigation vers client");
+
+    // ✅ Récupérer position client (GPS direct ou fallback Nominatim)
+    _clientPosition = await _getClientPosition(_courseEnCours!);
+    if (_clientPosition == null) return;
+
+    // Calculer l’itinéraire
+    final itineraire = await _calculerItineraire(_currentPosition!, _clientPosition!);
+    if (itineraire == null) return;
+
+    setState(() {
+      _navigationRoute = itineraire['points'];
+      _distanceRestante = itineraire['distance'];
+      _tempsRestant = itineraire['duration']?.round();
+      _etapeCourse = 'vers_client';
+
+      _polylines.clear();
+      _polylines.add(Polyline(
+        polylineId: PolylineId("vers_client"),
+        color: Colors.blue,
+        width: 5,
+        points: _navigationRoute,
+      ));
+
+      _updateMarkersVersClient();
+    });
+
+    print("⏱️ Temps estimé d’attente: $_tempsRestant minutes");
+    print("📍 Distance chauffeur → client: $_distanceRestante km");
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text("Le client doit attendre environ $_tempsRestant min"),
+        backgroundColor: Colors.orange,
+      ),
+    );
+
+    await _ajusterVueNavigation();
+    await _mettreAJourNavigationFirebase();
+
+    print("✅ Navigation vers client activée - ${_distanceRestante?.toStringAsFixed(1)} km");
+  }
+
+// 4. Navigation vers la destination (étape 2)
+  Future<void> _naviguerVersDestination() async {
+    if (_currentPosition == null || _courseEnCours == null) return;
+
+    print("🗺️ Début navigation vers destination");
+
+    // ✅ Récupérer la destination avec la méthode centralisée
+    _destinationPosition = await _getDestinationPosition(_courseEnCours!);
+    if (_destinationPosition == null) return;
+
+    // Calculer l'itinéraire
+    final itineraire = await _calculerItineraire(_currentPosition!, _destinationPosition!);
+    if (itineraire == null) return;
+
+    setState(() {
+      _navigationRoute = itineraire['points'];
+      _distanceRestante = itineraire['distance'];
+      _tempsRestant = itineraire['duration']?.round();
+      _etapeCourse = 'avec_client';
+
+      // Polyline
+      _polylines.clear();
+      _polylines.add(Polyline(
+        polylineId: PolylineId("vers_destination"),
+        color: Colors.green,
+        width: 5,
+        points: _navigationRoute,
+      ));
+
+      // Markers
+      _updateMarkersVersDestination();
+    });
+
+    await _ajusterVueNavigation();
+
+    print("✅ Navigation vers destination activée - ${_distanceRestante?.toStringAsFixed(1)} km");
+  }
+  // 5. Mise à jour des markers - Phase 1: Vers le client
+  void _updateMarkersVersClient() {
+    _markers.clear();
+
+    // Marker du chauffeur
+    if (_currentPosition != null) {
+      _markers.add(
+        Marker(
+          markerId: MarkerId("chauffeur"),
+          position: _currentPosition!,
+          infoWindow: InfoWindow(
+            title: "Ma position",
+            snippet: "Chauffeur Nu Demm",
+          ),
+          icon: _carIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
+        ),
+      );
+    }
+
+    // Marker du client
+    if (_clientPosition != null) {
+      _markers.add(
+        Marker(
+          markerId: MarkerId("client"),
+          position: _clientPosition!,
+          infoWindow: InfoWindow(
+            title: "Client à récupérer",
+            snippet: _courseEnCours?['nomClient'] ?? "Client",
+          ),
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+        ),
+      );
+    }
+  }
+
+// 6. Mise à jour des markers - Phase 2: Vers la destination
+  void _updateMarkersVersDestination() {
+    _markers.clear();
+
+    // Marker du chauffeur
+    if (_currentPosition != null) {
+      _markers.add(
+        Marker(
+          markerId: MarkerId("chauffeur"),
+          position: _currentPosition!,
+          infoWindow: InfoWindow(
+            title: "En course",
+            snippet: "Vers destination",
+          ),
+          icon: _carIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
+        ),
+      );
+    }
+
+    // Marker de la destination
+    if (_destinationPosition != null) {
+      _markers.add(
+        Marker(
+          markerId: MarkerId("destination"),
+          position: _destinationPosition!,
+          infoWindow: InfoWindow(
+            title: "Destination",
+            snippet: _shortenAddress(_courseEnCours?['destination']),
+          ),
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
+        ),
+      );
+    }
+  }
+
+// 7. Ajuster la vue de la carte
+  Future<void> _ajusterVueNavigation() async {
+    if (_navigationRoute.isEmpty) return;
+
+    try {
+      final GoogleMapController controller = await _mapController.future;
+
+      // Calculer les bounds de l'itinéraire
+      double minLat = _navigationRoute.map((p) => p.latitude).reduce((a, b) => math.min(a, b));
+      double maxLat = _navigationRoute.map((p) => p.latitude).reduce((a, b) => math.max(a, b));
+      double minLng = _navigationRoute.map((p) => p.longitude).reduce((a, b) => math.min(a, b));
+      double maxLng = _navigationRoute.map((p) => p.longitude).reduce((a, b) => math.max(a, b));
+
+      // Ajouter une marge
+      double marginLat = (maxLat - minLat) * 0.1;
+      double marginLng = (maxLng - minLng) * 0.1;
+
+      await controller.animateCamera(
+        CameraUpdate.newLatLngBounds(
+          LatLngBounds(
+            southwest: LatLng(minLat - marginLat, minLng - marginLng),
+            northeast: LatLng(maxLat + marginLat, maxLng + marginLng),
+          ),
+          100.0,
+        ),
+      );
+    } catch (e) {
+      print("❌ Erreur ajustement vue: $e");
+    }
+  }
+
+// 8. Mise à jour Firebase avec les infos de navigation
+  Future<void> _mettreAJourNavigationFirebase() async {
+    if (_courseEnCours == null) return;
+
+    try {
+      await FirebaseDatabase.instance
+          .ref()
+          .child("commandes")
+          .child(_courseEnCours!['id'])
+          .update({
+        "distanceVersClient": _distanceRestante,
+        "tempsEstimeVersClient": _tempsRestant,
+        "chauffeurLatitude": _currentPosition?.latitude,
+        "chauffeurLongitude": _currentPosition?.longitude,
+        "derniereMiseAJourNavigation": ServerValue.timestamp,
+      });
+    } catch (e) {
+      print("❌ Erreur mise à jour Firebase: $e");
+    }
+  }
+  // 10. MODIFICATION de la méthode _onClientRecupere
+  Future<void> _onClientRecupere() async {
+    if (_courseEnCours == null) return;
+
+    try {
+      // Mettre à jour le statut dans Firebase
+      await FirebaseDatabase.instance
+          .ref()
+          .child("commandes")
+          .child(_courseEnCours!['id'])
+          .update({
+        "status": "en_cours",
+        "heureRecuperationClient": ServerValue.timestamp,
+      });
+
+      // ✅ DÉMARRER LA NAVIGATION VERS LA DESTINATION
+      await _naviguerVersDestination();
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Client récupéré! Navigation vers la destination activée.'),
+          backgroundColor: Colors.blue,
+        ),
+      );
+
+    } catch (e) {
+      print("❌ Erreur récupération client: $e");
+    }
+  }
+
+// 11. Mise à jour en temps réel de la navigation
+  void _updateNavigationProgress() {
+    if (_currentPosition == null) return;
+
+    LatLng? destination;
+    if (_etapeCourse == 'vers_client' && _clientPosition != null) {
+      destination = _clientPosition;
+    } else if (_etapeCourse == 'avec_client' && _destinationPosition != null) {
+      destination = _destinationPosition;
+    }
+
+    if (destination != null) {
+      // Recalculer la distance restante
+      double distance = Geolocator.distanceBetween(
+        _currentPosition!.latitude,
+        _currentPosition!.longitude,
+        destination.latitude,
+        destination.longitude,
+      );
+
+      setState(() {
+        _distanceRestante = distance / 1000; // en km
+        _tempsRestant = (distance / 1000 * 3).round(); // estimation: 3 min par km
+      });
+
+      // Vérifier si on est arrivé
+      if (_etapeCourse == 'vers_client' && distance < 50) {
+        _showClientRecupereDialog();
+      } else if (_etapeCourse == 'avec_client' && distance < 50) {
+        _showDestinationAtteintDialog();
+      }
+
+      // Mettre à jour Firebase
+      _mettreAJourNavigationFirebase();
+    }
+  }
+
+// 12. Dialog quand on arrive près du client
+  void _showClientRecupereDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Client à proximité'),
+        content: Text('Vous êtes arrivé près du client. L\'avez-vous récupéré ?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Pas encore'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _onClientRecupere();
+            },
+            child: Text('Client récupéré'),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+          ),
+        ],
+      ),
+    );
+  }
+
+// 13. Dialog quand on arrive à destination
+  void _showDestinationAtteintDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Destination atteinte'),
+        content: Text('Vous êtes arrivé à destination. Terminer la course ?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Pas encore'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _terminerCourse();
+            },
+            child: Text('Terminer course'),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<LatLng?> _getClientPosition(Map<String, dynamic> commande) async {
+    try {
+      // 1️⃣ Vérifier si Firebase contient déjà les coordonnées
+      if (commande.containsKey('latitudeClient') && commande.containsKey('longitudeClient')) {
+        final lat = double.tryParse(commande['latitudeClient'].toString());
+        final lon = double.tryParse(commande['longitudeClient'].toString());
+
+        if (lat != null && lon != null) {
+          print("✅ Coordonnées client récupérées depuis Firebase: $lat, $lon");
+          return LatLng(lat, lon);
+        }
+      }
+
+      // 2️⃣ Sinon fallback: géocoder l’adresse texte avec Nominatim
+      final adresseClient = commande['positionClient'] as String?;
+      if (adresseClient != null && adresseClient.isNotEmpty) {
+        print("🔍 Géocodage de l’adresse client: $adresseClient");
+        return await _geocoderAdresse(adresseClient);
+      }
+    } catch (e) {
+      print("❌ Erreur récupération position client: $e");
+    }
+
+    // 3️⃣ Position par défaut à Dakar
+    print("⚠️ Utilisation position par défaut (Dakar)");
+    return LatLng(14.7167, -17.4677);
+  }
+  Future<LatLng?> _getDestinationPosition(Map<String, dynamic> commande) async {
+    try {
+      if (commande.containsKey('latitudeDestination') && commande.containsKey('longitudeDestination')) {
+        final lat = double.tryParse(commande['latitudeDestination'].toString());
+        final lon = double.tryParse(commande['longitudeDestination'].toString());
+
+        if (lat != null && lon != null) {
+          print("✅ Coordonnées destination récupérées depuis Firebase: $lat, $lon");
+          return LatLng(lat, lon);
+        }
+      }
+
+      // fallback: si on n’a pas les coordonnées, géocoder le texte
+      final adresse = commande['destination'] as String?;
+      if (adresse != null && adresse.isNotEmpty) {
+        return await _geocoderAdresse(adresse);
+      }
+    } catch (e) {
+      print("❌ Erreur récupération destination: $e");
+    }
+
+    return null;
+  }
+
   // 2. AJOUTER CETTE MÉTHODE POUR CRÉER L'ICÔNE CLIENT
   Future<BitmapDescriptor> _createClientIcon() async {
     try {
@@ -268,35 +725,6 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-// 6. AJOUTER CETTE MÉTHODE POUR AJUSTER LA VUE DE NAVIGATION
-  Future<void> _ajusterVueNavigation() async {
-    if (_currentPosition == null || _clientPosition == null) return;
-
-    try {
-      final GoogleMapController controller = await _mapController.future;
-
-      // Calculer les bounds avec une marge
-      double minLat = math.min(_currentPosition!.latitude, _clientPosition!.latitude) - 0.001;
-      double maxLat = math.max(_currentPosition!.latitude, _clientPosition!.latitude) + 0.001;
-      double minLng = math.min(_currentPosition!.longitude, _clientPosition!.longitude) - 0.001;
-      double maxLng = math.max(_currentPosition!.longitude, _clientPosition!.longitude) + 0.001;
-
-      await controller.animateCamera(
-        CameraUpdate.newLatLngBounds(
-          LatLngBounds(
-            southwest: LatLng(minLat, minLng),
-            northeast: LatLng(maxLat, maxLng),
-          ),
-          100.0, // Padding augmenté
-        ),
-      );
-
-      print("✅ Vue carte ajustée");
-    } catch (e) {
-      print("❌ Erreur ajustement vue: $e");
-    }
-  }
-
 // 7. MODIFIER LA MÉTHODE _confirmerCourse() POUR AJOUTER LA NAVIGATION
   Future<void> _confirmerCourse(Map<String, dynamic> commande) async {
     try {
@@ -349,41 +777,19 @@ class _HomePageState extends State<HomePage> {
         _courseEnCours = commande;
         _commandesEnAttente.clear();
         _sheetMinimized = true;
-        _etapeCourse = 'vers_client';
+       // _etapeCourse = 'vers_client';
       });
+      if (userAddress != null) {
+        // Géocoder l’adresse du chauffeur
+        final departChauffeur = await _geocoderAdresse(userAddress!);
 
-      // Navigation vers le client (code existant)
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _sheetController.animateTo(
-          0.25,
-          duration: Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
-      });
-
-      // Géocodage et navigation (code existant inchangé)
-      final adresseClient = commande['positionClient'] as String;
-      if (adresseClient != null) {
-        _clientPosition = await _geocoderAdresseClient(adresseClient);
-        if (_clientPosition != null) {
-          if (_clientIcon == null) {
-            _clientIcon = await _createClientIcon();
-          }
-          setState(() {
-            _courseEnCours = commande;
-            _commandesEnAttente.clear();
-          });
-          await _calculerNavigationVersClient();
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Navigation vers le client activée!'),
-              backgroundColor: Colors.blue,
-            ),
-          );
+        if (departChauffeur != null) {
+          _currentPosition = departChauffeur; // Point de départ du chauffeur
         }
       }
 
-      _commandeListener?.cancel();
+      await _naviguerVersClient();
+
       _ecouterCourseEnCours(commande['id']);
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -404,111 +810,63 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-// 8. AJOUTER CETTE MÉTHODE POUR METTRE À JOUR LA NAVIGATION EN TEMPS RÉEL
-  void _updateNavigationProgress() {
-    if (_currentPosition != null && _clientPosition != null) {
-      // Recalculer la distance restante
-      double distance = Geolocator.distanceBetween(
-        _currentPosition!.latitude,
-        _currentPosition!.longitude,
-        _clientPosition!.latitude,
-        _clientPosition!.longitude,
-      );
-
-      setState(() {
-        _distanceRestante = distance / 1000; // en km
-        _tempsRestant = (distance / 1000 * 3).round(); // estimation: 3 min par km
-      });
-
-      // Si très proche du client (moins de 50m), proposer "Client récupéré"
-      if (distance < 50) {
-        _showClientRecupereDialog();
-      }
-    }
-  }
-
-// 9. AJOUTER CETTE MÉTHODE POUR LE DIALOG "CLIENT RÉCUPÉRÉ"
-  void _showClientRecupereDialog() {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Client à proximité'),
-        content: Text('Vous êtes arrivé près du client. L\'avez-vous récupéré ?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text('Pas encore'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              Navigator.pop(context);
-              // Calculer l'itinéraire vers la destination
-              await _calculerNavigationVersDestination();
-            },
-            child: Text('Client récupéré'),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
-          ),
-        ],
-      ),
-    );
-  }
 
 // 10. AJOUTER CETTE MÉTHODE POUR LA NAVIGATION VERS LA DESTINATION
   Future<void> _calculerNavigationVersDestination() async {
-    if (_courseEnCours == null) return;
+    if (_courseEnCours == null || _currentPosition == null) return;
 
-    final destination = _courseEnCours!['destination'];
-    if (destination != null) {
-      final destinationCoords = await _geocoderAdresseClient(destination);
+    // ✅ Utiliser la méthode unifiée
+    final destinationCoords = await _getDestinationPosition(_courseEnCours!);
+    if (destinationCoords == null) return;
 
-      if (destinationCoords != null && _currentPosition != null) {
-        // Recalculer l'itinéraire vers la destination
-        try {
-          final url = Uri.parse(
-              'https://router.project-osrm.org/route/v1/driving/'
-                  '${_currentPosition!.longitude},${_currentPosition!.latitude};${destinationCoords.longitude},${destinationCoords.latitude}'
-                  '?overview=full&geometries=geojson'
-          );
+    try {
+      final url = Uri.parse(
+          'https://router.project-osrm.org/route/v1/driving/'
+              '${_currentPosition!.longitude},${_currentPosition!.latitude};'
+              '${destinationCoords.longitude},${destinationCoords.latitude}'
+              '?overview=full&geometries=geojson'
+      );
 
-          final response = await http.get(url);
+      final response = await http.get(url);
 
-          if (response.statusCode == 200) {
-            final data = json.decode(response.body);
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
 
-            if (data['routes'] != null && data['routes'].isNotEmpty) {
-              final route = data['routes'][0];
-              final geometry = route['geometry']['coordinates'];
+        if (data['routes'] != null && data['routes'].isNotEmpty) {
+          final route = data['routes'][0];
+          final geometry = route['geometry']['coordinates'];
 
-              List<LatLng> routePoints = geometry.map<LatLng>((coord) {
-                return LatLng(coord[1].toDouble(), coord[0].toDouble());
-              }).toList();
+          List<LatLng> routePoints = geometry.map<LatLng>((coord) {
+            return LatLng(coord[1].toDouble(), coord[0].toDouble());
+          }).toList();
 
-              setState(() {
-                _polylines.clear();
-                _polylines.add(Polyline(
-                  polylineId: PolylineId("destination_route"),
-                  color: Colors.green,
-                  width: 5,
-                  points: routePoints,
-                ));
+          setState(() {
+            _polylines.clear();
+            _polylines.add(Polyline(
+              polylineId: PolylineId("destination_route"),
+              color: Colors.green,
+              width: 5,
+              points: routePoints,
+            ));
 
-                // Mettre à jour les markers
-                _markers.removeWhere((marker) => marker.markerId.value == "client_pickup");
-                _markers.add(
-                  Marker(
-                    markerId: MarkerId("destination"),
-                    position: destinationCoords,
-                    infoWindow: InfoWindow(title: "Destination"),
-                    icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
-                  ),
-                );
-              });
-            }
-          }
-        } catch (e) {
-          print("Erreur navigation destination: $e");
+            // ✅ Marker destination
+            _markers.removeWhere((m) => m.markerId.value == "destination");
+            _markers.add(
+              Marker(
+                markerId: MarkerId("destination"),
+                position: destinationCoords,
+                infoWindow: InfoWindow(
+                  title: "Destination",
+                  snippet: _shortenAddress(_courseEnCours?['destination']),
+                ),
+                icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
+              ),
+            );
+          });
         }
       }
+    } catch (e) {
+      print("❌ Erreur navigation destination: $e");
     }
   }
 
@@ -544,50 +902,6 @@ class _HomePageState extends State<HomePage> {
       }
     } catch (e) {
       print("❌ Erreur mise à jour localisation: $e");
-    }
-  }
-  Future<void> _onClientRecupere() async {
-    if (_courseEnCours == null) return;
-
-    try {
-      // ✅ CORRECTION: Mettre le statut à "en_cours" au lieu de "client_recupere"
-      await FirebaseDatabase.instance
-          .ref()
-          .child("commandes")
-          .child(_courseEnCours!['id'])
-          .update({
-        "status": "en_cours", // ✅ Statut correct
-        "heureRecuperationClient": ServerValue.timestamp,
-      });
-
-      // Changer l'étape locale
-      setState(() {
-        _etapeCourse = 'avec_client';
-      });
-
-      // géocoder destination si nécessaire
-      final dest = _courseEnCours?['destination'] as String?;
-      if (dest != null) {
-        _destinationPosition = await _geocoderAdresseClient(dest);
-      }
-
-      // tracer client → destination
-      await _calculerNavigationVersDestination();
-
-      // recadrer sur chauffeur & destination si on a les 2
-      if (_currentPosition != null && _destinationPosition != null) {
-        await _fitBetween(_currentPosition!, _destinationPosition!);
-      }
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Client récupéré! Course démarrée.'),
-          backgroundColor: Colors.blue,
-        ),
-      );
-
-    } catch (e) {
-      print("❌ Erreur récupération client: $e");
     }
   }
   Future<void> _fitBetween(LatLng a, LatLng b, {double padding = 100}) async {
@@ -846,37 +1160,91 @@ class _HomePageState extends State<HomePage> {
       });
     });
   }
+  void _ecouterCommandesRepasEnAttente() {
+    _commandeListener?.cancel();
 
-  Future<void> _getDirections(LatLng origin, LatLng destination) async {
-    final apiKey = 'AIzaSyBD-qgcrVESVbRxRT69mM1pFrLKO0zoKKA';
-    final url =
-        'https://maps.googleapis.com/maps/api/directions/json?origin=${origin.latitude},${origin.longitude}&destination=${destination.latitude},${destination.longitude}&mode=driving&key=$apiKey';
+    DatabaseReference commandesRef =
+    FirebaseDatabase.instance.ref().child("commande_repas");
 
-    final response = await http.get(Uri.parse(url));
+    _commandeListener = commandesRef.onValue.listen((event) {
+      final data = event.snapshot.value;
+      List<Map<String, dynamic>> nouvellesCommandes = [];
 
-    if (response.statusCode == 200) {
-      final data = json.decode(response.body);
-      final points = data['routes'][0]['overview_polyline']['points'];
-      PolylinePoints polylinePoints = PolylinePoints();
-      List<PointLatLng> decodedPoints = polylinePoints.decodePolyline(points);
-
-      List<LatLng> polylineCoordinates = decodedPoints
-          .map((point) => LatLng(point.latitude, point.longitude))
-          .toList();
+      if (data != null && data is Map) {
+        data.forEach((key, value) {
+          final commande = Map<String, dynamic>.from(value);
+          if (commande["status"] == "en_attente") {
+            nouvellesCommandes.add({
+              "id": key,
+              ...commande,
+            });
+          }
+        });
+      }
 
       setState(() {
-        _polylines.clear();
-        _polylines.add(Polyline(
-          polylineId: PolylineId("route"),
-          color: Colors.red,
-          width: 5,
-          points: polylineCoordinates,
-        ));
+        _commandesEnAttente = nouvellesCommandes;
       });
-    } else {
-      print("Erreur Directions API : ${response.body}");
-    }
+
+      print("✅ Commandes Repas en attente: $_commandesEnAttente");
+    });
   }
+  void _ecouterToutesCommandesEnAttente() {
+    _commandeListener?.cancel();
+
+    // Liste globale pour accumuler toutes les commandes
+    List<Map<String, dynamic>> toutesCommandes = [];
+
+    // 1️⃣ Listener pour commandes classiques
+    DatabaseReference commandesRef = FirebaseDatabase.instance.ref().child("commandes");
+    commandesRef
+        .orderByChild("vtcNom")
+        .equalTo("Nu Demm")
+        .onValue
+        .listen((event) {
+      final data = event.snapshot.value;
+      if (data != null && data is Map) {
+        data.forEach((key, value) {
+          final commande = Map<String, dynamic>.from(value);
+          if (commande["status"] == "en_attente") {
+            // Vérifier qu'on ne duplique pas
+            if (!toutesCommandes.any((c) => c['id'] == key)) {
+              toutesCommandes.add({
+                "id": key,
+                ...commande,
+              });
+            }
+          }
+        });
+      }
+      setState(() {
+        _commandesEnAttente = List.from(toutesCommandes);
+      });
+    });
+
+    // 2️⃣ Listener pour commandes repas
+    DatabaseReference commandesRepasRef = FirebaseDatabase.instance.ref().child("commande_repas");
+    commandesRepasRef.onValue.listen((event) {
+      final data = event.snapshot.value;
+      if (data != null && data is Map) {
+        data.forEach((key, value) {
+          final commande = Map<String, dynamic>.from(value);
+          if (commande["status"] == "en_attente") {
+            if (!toutesCommandes.any((c) => c['id'] == key)) {
+              toutesCommandes.add({
+                "id": key,
+                ...commande,
+              });
+            }
+          }
+        });
+      }
+      setState(() {
+        _commandesEnAttente = List.from(toutesCommandes);
+      });
+    });
+  }
+
   Future<void> _appellerClient(String numeroTelephone) async {
     final Uri url = Uri(scheme: 'tel', path: numeroTelephone);
     if (await canLaunchUrl(url)) {
@@ -1027,22 +1395,29 @@ class _HomePageState extends State<HomePage> {
   }
 
   //////////////////////////////
+  // ✅ WIDGET AMÉLIORÉ POUR AFFICHER LA NAVIGATION
+
   Widget _buildCourseEnCoursWidget() {
     if (_courseEnCours == null) return SizedBox.shrink();
 
     final status = _courseEnCours!['status'];
     Color statusColor;
     String statusText;
+    String phaseText;
 
+    // Déterminer la phase actuelle
     if (status == 'confirmee') {
       statusColor = Colors.orange;
       statusText = 'Course confirmée';
-    } else if (status == 'client_recupere') {
-      statusColor = Colors.blueGrey;
-      statusText = 'Client récupéré';
-    } else {
+      phaseText = 'En route vers le client';
+    } else if (status == 'en_cours') {
       statusColor = Colors.blue;
       statusText = 'En cours';
+      phaseText = 'En route vers la destination';
+    } else {
+      statusColor = Colors.green;
+      statusText = 'Terminée';
+      phaseText = 'Course terminée';
     }
 
     return Container(
@@ -1062,7 +1437,7 @@ class _HomePageState extends State<HomePage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ✅ En-tête avec statut
+          // En-tête avec statut et phase
           Row(
             children: [
               Container(
@@ -1088,9 +1463,132 @@ class _HomePageState extends State<HomePage> {
             ],
           ),
 
+          SizedBox(height: 8),
+
+          // Phase de navigation
+          Container(
+            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: statusColor.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  _etapeCourse == 'vers_client' ? Icons.person_pin_circle : Icons.flag,
+                  color: statusColor,
+                  size: 16,
+                ),
+                SizedBox(width: 8),
+                Text(
+                  phaseText,
+                  style: TextStyle(
+                    color: statusColor,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 14,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
           SizedBox(height: 16),
 
-          // ✅ Infos client
+          // ✅ SECTION NAVIGATION - INFORMATIONS EN TEMPS RÉEL
+          if (_distanceRestante != null && _tempsRestant != null)
+            Container(
+              margin: EdgeInsets.only(bottom: 16),
+              padding: EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [Colors.blue.shade50, Colors.blue.shade100],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.blue.shade200),
+              ),
+              child: Column(
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.navigation, color: Colors.blue, size: 24),
+                      SizedBox(width: 8),
+                      Text(
+                        'Navigation GPS active',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                          color: Colors.blue.shade700,
+                        ),
+                      ),
+                    ],
+                  ),
+                  SizedBox(height: 12),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      // Distance
+                      Container(
+                        padding: EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(8),
+                          boxShadow: [BoxShadow(color: Colors.blue.shade100, blurRadius: 4)],
+                        ),
+                        child: Column(
+                          children: [
+                            Icon(Icons.straighten, color: Colors.blue, size: 20),
+                            SizedBox(height: 4),
+                            Text(
+                              '${_distanceRestante!.toStringAsFixed(1)} km',
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.blue.shade800,
+                              ),
+                            ),
+                            Text(
+                              'Distance',
+                              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                            ),
+                          ],
+                        ),
+                      ),
+                      // Temps
+                      Container(
+                        padding: EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(8),
+                          boxShadow: [BoxShadow(color: Colors.blue.shade100, blurRadius: 4)],
+                        ),
+                        child: Column(
+                          children: [
+                            Icon(Icons.access_time, color: Colors.blue, size: 20),
+                            SizedBox(height: 4),
+                            Text(
+                              '$_tempsRestant min',
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.blue.shade800,
+                              ),
+                            ),
+                            Text(
+                              _etapeCourse == 'vers_client' ? 'Temps d\'attente client' : 'Temps restant',
+                              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+
+          // Informations client
           Container(
             padding: EdgeInsets.all(12),
             decoration: BoxDecoration(
@@ -1112,17 +1610,23 @@ class _HomePageState extends State<HomePage> {
                     IconButton(
                       onPressed: () => _appellerClient(_courseEnCours!['telephoneduclient'] ?? ''),
                       icon: Icon(Icons.phone, color: Colors.green),
+                      tooltip: 'Appeler le client',
                     ),
                   ],
                 ),
                 SizedBox(height: 8),
                 Row(
                   children: [
-                    Icon(Icons.location_on, color: Colors.red),
+                    Icon(
+                      _etapeCourse == 'vers_client' ? Icons.my_location : Icons.location_on,
+                      color: _etapeCourse == 'vers_client' ? Colors.orange : Colors.red,
+                    ),
                     SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        'Départ: ${_shortenAddress(_courseEnCours?['positionClient'])}',
+                        _etapeCourse == 'vers_client'
+                            ? 'Récupération: ${_shortenAddress(_courseEnCours?['positionClient'])}'
+                            : 'Départ: ${_shortenAddress(_courseEnCours?['positionClient'])}',
                         style: TextStyle(fontSize: 14),
                       ),
                     ),
@@ -1131,12 +1635,19 @@ class _HomePageState extends State<HomePage> {
                 SizedBox(height: 4),
                 Row(
                   children: [
-                    Icon(Icons.flag, color: Colors.green),
+                    Icon(
+                      Icons.flag,
+                      color: _etapeCourse == 'avec_client' ? Colors.green : Colors.grey,
+                    ),
                     SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        'Arrivée: ${_shortenAddress(_courseEnCours?['destination'])}',
-                        style: TextStyle(fontSize: 14),
+                        'Destination: ${_shortenAddress(_courseEnCours?['destination'])}',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: _etapeCourse == 'avec_client' ? FontWeight.bold : FontWeight.normal,
+                          color: _etapeCourse == 'avec_client' ? Colors.green.shade700 : Colors.black87,
+                        ),
                       ),
                     ),
                   ],
@@ -1156,96 +1667,47 @@ class _HomePageState extends State<HomePage> {
             ),
           ),
 
-          if (_distanceRestante != null && _tempsRestant != null)
-            Container(
-              margin: EdgeInsets.symmetric(vertical: 12),
-              padding: EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.blue[50],
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Colors.blue.shade200),
-              ),
-              child: Column(
-                children: [
-                  Row(
-                    children: [
-                      Icon(Icons.navigation, color: Colors.blue),
-                      SizedBox(width: 8),
-                      Text(
-                        'Navigation active',
-                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                      ),
-                    ],
-                  ),
-                  SizedBox(height: 8),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceAround,
-                    children: [
-                      Column(
-                        children: [
-                          Text(
-                            '${_distanceRestante!.toStringAsFixed(1)} km',
-                            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                          ),
-                          Text('Distance', style: TextStyle(fontSize: 12)),
-                        ],
-                      ),
-                      Column(
-                        children: [
-                          Text(
-                            '$_tempsRestant min',
-                            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                          ),
-                          Text('Temps estimé', style: TextStyle(fontSize: 12)),
-                        ],
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-
           SizedBox(height: 16),
 
-          // ✅ Boutons d'action
-          Row(
-            // ✅ CORRECTION dans les boutons d'action:
-            children: [
-              if (status == 'confirmee') ...[
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: () async {
-                      await _onClientRecupere(); // ✅ Cette méthode met maintenant le statut à "en_cours"
-                    },
-                    icon: Icon(Icons.person_pin_circle),
-                    label: Text('Client récupéré'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.orange,
-                      foregroundColor: Colors.white,
-                      padding: EdgeInsets.symmetric(vertical: 12),
-                    ),
+          // Boutons d'action selon l'étape
+          if (status == 'confirmee') ...[
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _onClientRecupere,
+                icon: Icon(Icons.person_pin_circle),
+                label: Text('Client récupéré'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.orange,
+                  foregroundColor: Colors.white,
+                  padding: EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
                   ),
                 ),
-              ] else if (status == 'en_cours') ...[
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _terminerCourse,
-                    icon: Icon(Icons.flag),
-                    label: Text('Terminer course'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.green,
-                      foregroundColor: Colors.white,
-                      padding: EdgeInsets.symmetric(vertical: 12),
-                    ),
+              ),
+            ),
+          ] else if (status == 'en_cours') ...[
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _terminerCourse,
+                icon: Icon(Icons.flag),
+                label: Text('Terminer la course'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                  padding: EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
                   ),
                 ),
-              ],
-            ],
-          ),
+              ),
+            ),
+          ],
         ],
       ),
     );
-
   }
   Widget _buildDetailRow(IconData icon, String label, String value) {
     return Padding(
@@ -1500,6 +1962,7 @@ class _HomePageState extends State<HomePage> {
                                 _isOnline = value;
                                 if (_isOnline) {
                                   _ecouterCommandesEnAttente();
+                                 // _ecouterToutesCommandesEnAttente();
                                 } else {
                                   _commandeListener?.cancel();
                                   _commandesEnAttente.clear();
